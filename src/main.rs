@@ -1,45 +1,49 @@
-mod models;
+pub mod models;
 use std::env;
 
-use bytes::Bytes;
-use http_body_util::{BodyExt, Empty};
-use models::cards;
+use http::{HeaderMap, HeaderValue, Uri};
 use regex::Regex;
-use serde::Deserialize;
+use serenity::Client;
+use serenity::all::GatewayIntents;
+use serenity::all::{Context, EventHandler, Message, Ready};
 use serenity::async_trait;
-use serenity::model::channel::Message;
-use serenity::model::gateway::Ready;
-use serenity::prelude::*;
+use serenity::prelude::TypeMapKey;
 
+use crate::models::cards::Card;
+use crate::models::queries::{self, ReturnList};
 struct Handler;
+struct ReqwestClient;
+
+impl TypeMapKey for ReqwestClient {
+    type Value = reqwest::Client;
+}
 
 const SCRYFALL_API: &'static str = "https://api.scryfall.com";
 const CARDS_SEARCH: &'static str = "/cards/search";
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-struct CardSearch {
-    pub q: String,
-    pub unique: Option<String>,
-    pub order: Option<String>,
-    pub dir: Option<String>,
-    pub include_extras: Option<bool>,
-    pub include_multilingual: Option<bool>,
-    pub include_variations: Option<bool>,
-    pub page: Option<i32>,
-    pub format: Option<String>,
-}
-
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
+        let data = ctx.data.read().await;
+        let Some(http_c) = data.get::<ReqwestClient>() else {
+            return;
+        };
+        let http_client = http_c.clone();
         let re = Regex::new(r"\[\[(.*)\]\]").unwrap();
         let Some(caps) = re.captures(&msg.content) else {
             return;
         };
+        let mut card: Card = Card::default();
+        if let Err(err) =
+            fetch_json(http_client, String::from(caps[1].to_string()), &mut card).await
+        {
+            println!("{}", err);
+            panic!();
+        }
+
         if let Err(why) = msg
             .channel_id
-            .say(&ctx.http, format!("CardName: {}", &caps[1]))
+            .say(&ctx.http, format!("{} costs {}", card.name, card.cmc))
             .await
         {
             println!("Error sending message: {why:?}");
@@ -51,7 +55,41 @@ impl EventHandler for Handler {
     }
 }
 
-async fn fetch_json(url: hyper::Uri) {}
+async fn fetch_json(
+    http_client: reqwest::Client,
+    card: String,
+    return_card: &mut Card,
+) -> Result<(), reqwest::Error> {
+    let card_search = queries::CardSearch {
+        q: card,
+        unique: None,
+        order: None,
+        dir: None,
+        include_extras: None,
+        include_multilingual: None,
+        include_variations: None,
+        page: None,
+        format: None,
+    };
+
+    let config: serde_qs::Config = serde_qs::Config::new().use_form_encoding(true);
+    let search: String = config.serialize_string(&card_search).unwrap();
+    let url: String = format!("{}{}?{}", SCRYFALL_API, CARDS_SEARCH, search);
+
+    let res = http_client.get(url).send().await?.error_for_status()?;
+    let content = res.text().await.unwrap();
+    println!("{}", content);
+    let t = match serde_json::from_str::<ReturnList<Card>>(&content) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("Parse error: {e}");
+            panic!("");
+        }
+    };
+
+    *return_card = t.data.into_iter().next().unwrap();
+    return Ok(());
+}
 
 #[tokio::main]
 async fn main() {
@@ -72,6 +110,24 @@ async fn main() {
         .event_handler(Handler)
         .await
         .expect("Err creating client");
+
+    {
+        let mut data = client.data.write().await;
+        let mut headers = HeaderMap::new();
+        headers.append(http::header::ACCEPT, HeaderValue::from_str("*/*").unwrap());
+        //TODO: Make Guards
+        headers.append(
+            http::header::USER_AGENT,
+            HeaderValue::from_str("PILIXScryfallBot/0.1").unwrap(),
+        );
+        //TODO: Make Guards
+        let http_cli = reqwest::Client::builder()
+            .http2_prior_knowledge()
+            .default_headers(headers)
+            .build()
+            .unwrap();
+        data.insert::<ReqwestClient>(http_cli);
+    }
 
     // Finally, start a single shard, and start listening to events.
     //
