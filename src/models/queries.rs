@@ -22,6 +22,29 @@ pub struct CardSearch {
     pub format: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardName {
+    Exact(String),
+    Fuzzy(String),
+}
+
+#[derive(Serialize)]
+pub struct CardNamed {
+    #[serde(flatten)]
+    pub name: CardName,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub face: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pretty: Option<bool>,
+}
+
 mod uri_serde {
     use http::Uri;
     use serde::{self, Deserialize, Deserializer, Serializer};

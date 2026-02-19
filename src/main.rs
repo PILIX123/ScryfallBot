@@ -10,7 +10,7 @@ use serenity::async_trait;
 use serenity::prelude::TypeMapKey;
 
 use crate::models::cards::Card;
-use crate::models::queries::{self, ReturnList};
+use crate::models::queries::{self};
 struct Handler;
 struct ReqwestClient;
 
@@ -25,7 +25,7 @@ impl TypeMapKey for SerdeQsConfig {
 }
 
 const SCRYFALL_API: &'static str = "https://api.scryfall.com";
-const CARDS_SEARCH: &'static str = "/cards/search";
+const CARDS_NAMED: &'static str = "/cards/named";
 
 #[async_trait]
 impl EventHandler for Handler {
@@ -49,16 +49,11 @@ impl EventHandler for Handler {
             match fetch_json(http_client, conf, String::from(caps[1].to_string())).await {
                 Ok(res) => {
                     let content = res.text().await.unwrap();
-                    let return_list = serde_json::from_str::<ReturnList<Card>>(&content)
-                        .unwrap_or_else(|error| {
-                            println!("Parse error: {error}");
-                            panic!("");
-                        });
-                    let possible_card = return_list.data.into_iter().next();
-                    match possible_card {
-                        Some(c) => c,
-                        None => panic!("This should never happen"),
-                    }
+                    let c = serde_json::from_str::<Card>(&content).unwrap_or_else(|error| {
+                        println!("Parse error: {error}");
+                        panic!("");
+                    });
+                    c
                 }
                 Err(err) => match err.status() {
                     Some(a) if a.is_client_error() => {
@@ -124,20 +119,17 @@ async fn fetch_json(
     config: &serde_qs::Config,
     card: String,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    let card_search = queries::CardSearch {
-        q: card,
-        unique: None,
-        order: None,
-        dir: None,
-        include_extras: None,
-        include_multilingual: None,
-        include_variations: None,
-        page: None,
+    let card_search = queries::CardNamed {
+        name: queries::CardName::Fuzzy(card),
+        set: None,
         format: None,
+        face: None,
+        version: None,
+        pretty: None,
     };
 
     let search: String = config.serialize_string(&card_search).unwrap();
-    let url: String = format!("{}{}?{}", SCRYFALL_API, CARDS_SEARCH, search);
+    let url: String = format!("{}{}?{}", SCRYFALL_API, CARDS_NAMED, search);
 
     let res = http_client.get(url).send().await?.error_for_status()?;
     return Ok(res);
@@ -152,9 +144,7 @@ async fn main() {
     }
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
     // Set gateway intents, which decides what events the bot will be notified about
-    let intents = GatewayIntents::GUILD_MESSAGES
-        | GatewayIntents::DIRECT_MESSAGES
-        | GatewayIntents::MESSAGE_CONTENT;
+    let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
 
     // Create a new instance of the Client, logging in as a bot. This will automatically prepend
     // your bot token with "Bot ", which is a requirement by Discord for bot users.
@@ -164,7 +154,7 @@ async fn main() {
         .expect("Err creating client");
 
     {
-        let config: serde_qs::Config = serde_qs::Config::new().use_form_encoding(true);
+        let config: serde_qs::Config = serde_qs::Config::new();
         let mut data = client.data.write().await;
         let mut headers = HeaderMap::new();
         headers.append(http::header::ACCEPT, HeaderValue::from_str("*/*").unwrap());
