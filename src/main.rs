@@ -11,6 +11,7 @@ use serenity::prelude::TypeMapKey;
 
 use crate::models::cards::Card;
 use crate::models::queries::{self};
+use crate::models::symbols::Symbols;
 struct Handler;
 struct ReqwestClient;
 
@@ -49,6 +50,7 @@ impl EventHandler for Handler {
             match fetch_json(http_client, conf, String::from(caps[1].to_string())).await {
                 Ok(res) => {
                     let content = res.text().await.unwrap();
+                    //TODO: Deal with double sided cards
                     let c = serde_json::from_str::<Card>(&content).unwrap_or_else(|error| {
                         println!("Parse error: {error}");
                         panic!("");
@@ -97,8 +99,8 @@ impl EventHandler for Handler {
             format!(
                 "{} costs {} and reads \n\"{}\"",
                 card.name,
-                card.cmc,
-                card.oracle_text.unwrap_or("".to_string())
+                parse_symbols(card.mana_cost),
+                parse_symbols(card.oracle_text),
             ),
         )
         .await;
@@ -181,4 +183,21 @@ async fn main() {
     if let Err(why) = client.start().await {
         println!("Client error: {why:?}");
     }
+}
+
+fn parse_symbols(symbol_string: Option<String>) -> String {
+    let oracle = match symbol_string {
+        Some(text) => text,
+        None => return String::from(""),
+    };
+
+    let re = Regex::new(r"(\{[\w/∞½]*\})").unwrap();
+
+    re.replace_all(&oracle, |caps: &regex::Captures| {
+        match Symbols::try_from(&caps[0]) {
+            Ok(symbol) => symbol.value().to_string(),
+            Err(_) => caps[0].to_string(),
+        }
+    })
+    .to_string()
 }
