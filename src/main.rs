@@ -1,11 +1,11 @@
 pub mod models;
 use std::env;
 
-use http::{HeaderMap, HeaderValue, Uri};
+use http::{HeaderMap, HeaderValue};
 use regex::Regex;
 use serenity::Client;
 use serenity::all::GatewayIntents;
-use serenity::all::{Context, EventHandler, Message, Ready};
+use serenity::all::{Context, EventHandler, Http, Message, Ready};
 use serenity::async_trait;
 use serenity::prelude::TypeMapKey;
 
@@ -18,14 +18,26 @@ impl TypeMapKey for ReqwestClient {
     type Value = reqwest::Client;
 }
 
+struct SerdeQsConfig;
+
+impl TypeMapKey for SerdeQsConfig {
+    type Value = serde_qs::Config;
+}
+
 const SCRYFALL_API: &'static str = "https://api.scryfall.com";
 const CARDS_SEARCH: &'static str = "/cards/search";
 
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
+        if msg.author.bot {
+            return;
+        }
         let data = ctx.data.read().await;
         let Some(http_c) = data.get::<ReqwestClient>() else {
+            return;
+        };
+        let Some(conf) = data.get::<SerdeQsConfig>() else {
             return;
         };
         let http_client = http_c.clone();
@@ -33,21 +45,68 @@ impl EventHandler for Handler {
         let Some(caps) = re.captures(&msg.content) else {
             return;
         };
-        let mut card: Card = Card::default();
-        if let Err(err) =
-            fetch_json(http_client, String::from(caps[1].to_string()), &mut card).await
-        {
-            println!("{}", err);
-            panic!();
-        }
+        let card: Card =
+            match fetch_json(http_client, conf, String::from(caps[1].to_string())).await {
+                Ok(res) => {
+                    let content = res.text().await.unwrap();
+                    let return_list = serde_json::from_str::<ReturnList<Card>>(&content)
+                        .unwrap_or_else(|error| {
+                            println!("Parse error: {error}");
+                            panic!("");
+                        });
+                    let possible_card = return_list.data.into_iter().next();
+                    match possible_card {
+                        Some(c) => c,
+                        None => panic!("This should never happen"),
+                    }
+                }
+                Err(err) => match err.status() {
+                    Some(a) if a.is_client_error() => {
+                        match a.as_u16() {
+                            404 => {
+                                send_message(
+                                    msg,
+                                    &ctx.http,
+                                    String::from("No card with this name exist"),
+                                )
+                                .await
+                            }
+                            _ => {
+                                send_message(
+                                    msg,
+                                    &ctx.http,
+                                    String::from("Sounds like a problem for the bot maintainer"),
+                                )
+                                .await
+                            }
+                        }
 
-        if let Err(why) = msg
-            .channel_id
-            .say(&ctx.http, format!("{} costs {}", card.name, card.cmc))
-            .await
-        {
-            println!("Error sending message: {why:?}");
-        }
+                        return;
+                    }
+                    Some(_a) => {
+                        send_message(
+                            msg,
+                            &ctx.http,
+                            String::from("There was an error plz try again later"),
+                        )
+                        .await;
+                        return;
+                    }
+                    None => return,
+                },
+            };
+
+        send_message(
+            msg,
+            &ctx.http,
+            format!(
+                "{} costs {} and reads \n\"{}\"",
+                card.name,
+                card.cmc,
+                card.oracle_text.unwrap_or("".to_string())
+            ),
+        )
+        .await;
     }
 
     async fn ready(&self, _: Context, ready: Ready) {
@@ -55,11 +114,16 @@ impl EventHandler for Handler {
     }
 }
 
+async fn send_message(msg: Message, http_ctx: &Http, message: String) {
+    if let Err(why) = msg.channel_id.say(http_ctx, message).await {
+        println!("Error sending message: {why:?}");
+    }
+}
 async fn fetch_json(
     http_client: reqwest::Client,
+    config: &serde_qs::Config,
     card: String,
-    return_card: &mut Card,
-) -> Result<(), reqwest::Error> {
+) -> Result<reqwest::Response, reqwest::Error> {
     let card_search = queries::CardSearch {
         q: card,
         unique: None,
@@ -72,23 +136,11 @@ async fn fetch_json(
         format: None,
     };
 
-    let config: serde_qs::Config = serde_qs::Config::new().use_form_encoding(true);
     let search: String = config.serialize_string(&card_search).unwrap();
     let url: String = format!("{}{}?{}", SCRYFALL_API, CARDS_SEARCH, search);
 
     let res = http_client.get(url).send().await?.error_for_status()?;
-    let content = res.text().await.unwrap();
-    println!("{}", content);
-    let t = match serde_json::from_str::<ReturnList<Card>>(&content) {
-        Ok(t) => t,
-        Err(e) => {
-            println!("Parse error: {e}");
-            panic!("");
-        }
-    };
-
-    *return_card = t.data.into_iter().next().unwrap();
-    return Ok(());
+    return Ok(res);
 }
 
 #[tokio::main]
@@ -112,21 +164,24 @@ async fn main() {
         .expect("Err creating client");
 
     {
+        let config: serde_qs::Config = serde_qs::Config::new().use_form_encoding(true);
         let mut data = client.data.write().await;
         let mut headers = HeaderMap::new();
         headers.append(http::header::ACCEPT, HeaderValue::from_str("*/*").unwrap());
-        //TODO: Make Guards
         headers.append(
             http::header::USER_AGENT,
             HeaderValue::from_str("PILIXScryfallBot/0.1").unwrap(),
         );
-        //TODO: Make Guards
         let http_cli = reqwest::Client::builder()
             .http2_prior_knowledge()
             .default_headers(headers)
-            .build()
-            .unwrap();
-        data.insert::<ReqwestClient>(http_cli);
+            .build();
+
+        match http_cli {
+            Ok(cli) => data.insert::<ReqwestClient>(cli),
+            Err(err) => panic!("Couldnt make the Http clien {:?}", err),
+        }
+        data.insert::<SerdeQsConfig>(config);
     }
 
     // Finally, start a single shard, and start listening to events.

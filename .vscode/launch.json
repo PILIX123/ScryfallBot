@@ -11,6 +11,7 @@
             "cargo": {
                 "args": ["run", "--bin=scryfall_bot"]
             },
+            "env": { "RUST_BACKTRACE": "full" },
             "args": []
         },
         {
